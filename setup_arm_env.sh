@@ -348,7 +348,7 @@ install_dependencies() {
 }
 
 # Zenoh Router 级联部署（方式 B）：PC 常驻 router 并上联机器人 7447。
-# 等价于：sudo bash ./deploy-pc.sh --h1-ip 10.42.0.2 --user "$USER"
+# 等价于：sudo python3 ./deploy.py pc --h1-ip 10.42.0.2 --user "$USER"
 deploy_zenoh() {
     log "========== 第 2 步：部署 Zenoh（Router 级联，网线直连 PC） =========="
     if [[ "${SKIP_ZENOH:-0}" == "1" ]]; then
@@ -356,14 +356,14 @@ deploy_zenoh() {
         return 0
     fi
 
-    # 兼容两种存放位置：./scripts/deploy-pc.sh 或 ./deploy-pc.sh
+    # 兼容两种存放位置：./scripts/deploy.py 或 ./deploy.py
     local deploy_dir=""
-    if [[ -f "./scripts/deploy-pc.sh" ]]; then
+    if [[ -f "./scripts/deploy.py" ]]; then
         deploy_dir="./scripts"
-    elif [[ -f "./deploy-pc.sh" ]]; then
+    elif [[ -f "./deploy.py" ]]; then
         deploy_dir="."
     else
-        die "未找到 deploy-pc.sh（可放在 ./scripts/ 或脚本同级目录）。"
+        die "未找到 deploy.py（可放在 ./scripts/ 或脚本同级目录）。"
     fi
 
     local asset
@@ -371,9 +371,8 @@ deploy_zenoh() {
         [[ -f "${deploy_dir}/${asset}" ]] || die "缺少 Zenoh 部署资源：${deploy_dir}/${asset}"
     done
 
-    local deploy="${deploy_dir}/deploy-pc.sh"
-    log "执行：sudo bash ${deploy} --h1-ip ${H1_IP} --user ${TARGET_USER}"
-    sudo bash "${deploy}" --h1-ip "${H1_IP}" --user "${TARGET_USER}"
+    log "执行：sudo python3 ${deploy_dir}/deploy.py pc --h1-ip ${H1_IP} --user ${TARGET_USER}"
+    sudo python3 "${deploy_dir}/deploy.py" pc --h1-ip "${H1_IP}" --user "${TARGET_USER}"
     log "Zenoh Router 部署完成。"
 
     printf '\n\033[1;33m[注意]\033[0m Zenoh 已按照【网线直连 PC】的方式完成配置（PC <-> 机器人 end1，%s:7447）。\n' "${H1_IP}"

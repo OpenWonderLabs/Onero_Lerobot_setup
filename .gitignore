@@ -10,6 +10,9 @@ install.zip.orig
 # RBDL 源码/编译目录
 dev/
 
+# 运行时生成的 udev 规则（由 setup_arm_env.sh 写入）
+usbcan.rules
+
 # Python 缓存
 __pycache__/
 *.py[cod]
