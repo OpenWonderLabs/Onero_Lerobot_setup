@@ -2,7 +2,7 @@
 # 一键部署入口：临时拉取部署包 -> 执行 setup_arm_env.sh -> 清理临时目录。
 #
 # 用法：
-#   curl -fsSL https://raw.githubusercontent.com/<owner>/<repo>/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/woan-denglanjin/lerobot-h1-setup/main/install.sh | bash
 #
 # 可用环境变量覆盖：
 #   H1_REPO_URL   仓库地址（默认值为下方 REPO_URL）
@@ -10,7 +10,7 @@
 
 set -euo pipefail
 
-REPO_URL="${1:-${H1_REPO_URL:-https://github.com/CHANGE_ME/robot_ws.git}}"
+REPO_URL="${1:-${H1_REPO_URL:-https://github.com/woan-denglanjin/lerobot-h1-setup.git}}"
 BRANCH="${H1_BRANCH:-main}"
 
 say() { printf '[robot-h1] %s\n' "$*" >&2; }
