@@ -1,0 +1,18 @@
+[Unit]
+Description=ROS 2 Zenoh router (PC or Orin link to H1)
+After=network.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=exec
+Environment=ZENOH_ROUTER_CONFIG_URI=/opt/ros/jazzy/share/rmw_zenoh_cpp/config/DEFAULT_RMW_ZENOH_ROUTER_CONFIG.json5
+Environment=RUST_LOG=zenoh=info
+EnvironmentFile=/etc/zenoh/router.env
+UnsetEnvironment=CYCLONEDDS_URI
+ExecStart=/bin/bash -ec 'source /opt/ros/jazzy/setup.bash; exec /opt/ros/jazzy/lib/rmw_zenoh_cpp/rmw_zenohd'
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=5s
+
+[Install]
+WantedBy=multi-user.target

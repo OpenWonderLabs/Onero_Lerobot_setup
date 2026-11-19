@@ -1,0 +1,195 @@
+#!/usr/bin/env python3
+"""Set this PC's Zenoh router target; never source or evaluate its env file."""
+import argparse
+import ipaddress
+import json
+import os
+from pathlib import Path
+import re
+import socket
+import stat
+import subprocess
+import tempfile
+
+
+CONFIG = Path('/etc/zenoh/router.env')
+SERVICE = 'zenoh-router.service'
+
+
+class ConfigurationError(Exception):
+    pass
+
+
+def validate_target(value):
+    try:
+        address = ipaddress.IPv4Address(value)
+    except ipaddress.AddressValueError as error:
+        raise ConfigurationError('H1 address must be a numeric IPv4 address.') from error
+    if (address.is_unspecified or address.is_loopback or address.is_multicast
+            or address.is_reserved or address in ipaddress.IPv4Network('0.0.0.0/8')):
+        raise ConfigurationError('H1 address must be a usable unicast IPv4 address.')
+    return str(address)
+
+
+def replace_target(content, target):
+    lines = content.splitlines(keepends=True)
+    matches = [i for i, line in enumerate(lines)
+               if re.match(r'^\s*ZENOH_CONFIG_OVERRIDE\s*=', line)]
+    if len(matches) != 1:
+        raise ConfigurationError('Expected exactly one ZENOH_CONFIG_OVERRIDE assignment.')
+    index = matches[0]
+    match = re.fullmatch(
+        r"(?P<prefix>[ \t]*ZENOH_CONFIG_OVERRIDE[ \t]*=[ \t]*')"
+        r"(?P<body>[^'\\\r\n]*)(')([ \t]*)(\r?\n)?", lines[index])
+    if not match:
+        raise ConfigurationError('Only a single-line, single-quoted override is supported.')
+    body = match.group('body')
+    parts = body.split(';')
+    entries = {}
+    for part_index, part in enumerate(parts):
+        entry = re.fullmatch(r'\s*([A-Za-z_][A-Za-z0-9_/]*)\s*=\s*(.*?)\s*', part)
+        if not entry or entry[1] in entries:
+            raise ConfigurationError('Unsupported or duplicate override; configuration unchanged.')
+        try:
+            value = json.loads(entry[2])
+        except ValueError as error:
+            raise ConfigurationError('Override values must be JSON without embedded semicolons.') from error
+        entries[entry[1]] = (part_index, entry, value)
+    if (entries.get('listen/endpoints', (None, None, None))[2]
+            != ['tcp/127.0.0.1:7447']):
+        raise ConfigurationError('PC router must already listen only on tcp/127.0.0.1:7447.')
+    connect = entries.get('connect/endpoints')
+    if not connect or not isinstance(connect[2], list) or len(connect[2]) != 1:
+        raise ConfigurationError('Expected one existing connect/endpoints target.')
+    endpoint = connect[2][0]
+    old_match = re.fullmatch(r'tcp/([0-9.]+):7447', endpoint) if isinstance(endpoint, str) else None
+    if not old_match:
+        raise ConfigurationError('Existing target must be one tcp/IPv4:7447 endpoint.')
+    previous = validate_target(old_match[1])
+    if previous == target:
+        return content, previous, body
+    part_index, entry, _ = connect
+    part = parts[part_index]
+    parts[part_index] = (part[:entry.start(2)] + json.dumps([f'tcp/{target}:7447'])
+                         + part[entry.end(2):])
+    new_body = ';'.join(parts)
+    lines[index] = (lines[index][:match.start('body')] + new_body
+                    + lines[index][match.end('body'):])
+    return ''.join(lines), previous, new_body
+
+
+def probe_target(target):
+    with socket.create_connection((target, 7447), timeout=3):
+        pass
+
+
+def router_active():
+    return subprocess.run(['systemctl', 'is-active', '--quiet', SERVICE],
+                          capture_output=True, timeout=5).returncode == 0
+
+
+def restart_router():
+    subprocess.run(['systemctl', 'restart', SERVICE], check=True,
+                   capture_output=True, text=True, timeout=20)
+
+
+def router_uses_override(override):
+    try:
+        result = subprocess.run(['systemctl', 'show', '--property=MainPID', '--value', SERVICE],
+                                check=True, capture_output=True, text=True, timeout=5)
+        pid = int(result.stdout.strip())
+        if pid <= 0:
+            return False
+        environment = Path(f'/proc/{pid}/environ').read_bytes().split(b'\0')
+        return f'ZENOH_CONFIG_OVERRIDE={override}'.encode('utf-8') in environment
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return False
+
+
+def write_file(path, content, metadata, atomic):
+    prefix = f'.{path.name}.' if atomic else f'{path.name}.backup-'
+    fd, name = tempfile.mkstemp(prefix=prefix, dir=path.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(fd, 'wb') as stream:
+            os.fchown(stream.fileno(), metadata.st_uid, metadata.st_gid)
+            os.fchmod(stream.fileno(), stat.S_IMODE(metadata.st_mode) if atomic else 0o600)
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if atomic:
+            os.replace(temporary, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        return path if atomic else temporary
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def change_target(config, target):
+    target = validate_target(target)
+    if config.is_symlink() or not config.is_file():
+        raise ConfigurationError(f'Expected an existing regular file: {config}')
+    metadata = config.stat()
+    original = config.read_bytes()
+    content, previous, override = replace_target(original.decode('utf-8'), target)
+    if previous == target and router_active() and router_uses_override(override):
+        return {'changed': False, 'restarted': False, 'backup': None}
+    try:
+        probe_target(target)
+    except OSError as error:
+        raise ConfigurationError(f'TCP {target}:7447 is unreachable; configuration unchanged: {error}') from error
+    if config.read_bytes() != original:
+        raise ConfigurationError('Configuration changed during the check; retry after reviewing it.')
+    changed = content.encode('utf-8') != original
+    backup = write_file(config, original, metadata, atomic=False) if changed else None
+    try:
+        if changed:
+            write_file(config, content.encode('utf-8'), metadata, atomic=True)
+        restart_router()
+        if not router_active() or not router_uses_override(override):
+            raise RuntimeError('Router did not become active with the requested configuration.')
+    except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+        recovery = []
+        if changed:
+            try:
+                write_file(config, original, metadata, atomic=True)
+                recovery.append('original configuration restored')
+            except OSError as restore_error:
+                recovery.append(f'configuration recovery failed: {restore_error}')
+        try:
+            restart_router()
+            original_override = replace_target(original.decode('utf-8'), previous)[2]
+            if not router_active() or not router_uses_override(original_override):
+                raise RuntimeError('Router is not active with the original configuration.')
+            recovery.append('Router service recovered')
+        except (OSError, RuntimeError, subprocess.SubprocessError) as restore_error:
+            recovery.append(f'Router recovery failed: {restore_error}')
+        raise ConfigurationError(f'Could not apply target: {error}; {"; ".join(recovery)}; '
+                                 f'backup: {backup or "configuration was unchanged"}') from error
+    return {'changed': changed, 'restarted': True, 'backup': backup}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('h1_ipv4', help='reachable H1 end1 IPv4 address')
+    args = parser.parse_args()
+    if os.geteuid() != 0:
+        parser.exit(1, 'Run with sudo: sudo robot-zenoh-connect <H1 IPv4>\n')
+    try:
+        result = change_target(CONFIG, args.h1_ipv4)
+    except (ConfigurationError, OSError, UnicodeError, subprocess.SubprocessError) as error:
+        parser.exit(1, f'{error}\n')
+    action = 'restarted' if result['restarted'] else 'already active; no restart needed'
+    print(f'Local Router target: {args.h1_ipv4}:7447; {action}.')
+    if result['backup']:
+        print(f'Previous configuration: {result["backup"]}')
+    print('ROS topic/service delivery still needs verification.')
+
+
+if __name__ == '__main__':
+    main()
