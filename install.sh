@@ -19,9 +19,6 @@ die() { say "错误：$*"; exit 1; }
 if [[ "${EUID}" -eq 0 ]]; then
     die "请用普通用户运行，不要加 sudo；脚本会在需要时自行申请。"
 fi
-if [[ "${REPO_URL}" == *CHANGE_ME* ]]; then
-    die "请先在 install.sh 中填入仓库地址，或设置 H1_REPO_URL=<仓库地址>。"
-fi
 
 command -v curl >/dev/null 2>&1 || die "缺少 curl。"
 command -v sudo >/dev/null 2>&1 || die "缺少 sudo。"
