@@ -2,12 +2,13 @@
 # setup_arm_env.sh — 主臂环境一键部署
 #
 # 流程：
-#   [1/3] 安装前置依赖（已内联，无需 install_deps.sh）
-#   [2/3] 部署 Zenoh（Router 级联，PC 网线直连机器人）
-#   [3/3] 交互式配置左右臂 USB-CAN 固定端口：
+#   [1/4] 安装前置依赖
+#   [2/4] 部署 Zenoh（Router 级联，PC 网线直连机器人）
+#   [3/4] 交互式配置左右臂 USB-CAN 固定端口：
 #         插左臂 -> 自动检测新增 /dev/ttyACM* -> 写入 usbcan.rules 的 ttyMasterCANL
 #         插右臂 -> 自动检测新增 /dev/ttyACM* -> 写入 usbcan.rules 的 ttyMasterCANR
 #         自动安装规则并 reload，生成 /dev/ttyMasterCANL 与 /dev/ttyMasterCANR
+#   [4/4] 安装主臂运行时到 /opt/robot-h1，并生成 /usr/local/bin/arm_record_node
 #
 # 用法（在本脚本所在目录执行）：
 #   chmod +x setup_arm_env.sh
@@ -33,7 +34,7 @@ ACM_WAIT_SECONDS="${ACM_WAIT_SECONDS:-15}"
 H1_IP="${H1_IP:-10.42.0.2}"
 TARGET_USER="${SUDO_USER:-${USER:-$(id -un)}}"
 
-# 依赖安装参数（原 install_deps.sh）
+# 依赖安装参数
 WORK_DIR="${WORK_DIR:-./dev}"
 RBDL_VERSION="v3.3.1"
 JOBS="$(nproc)"
@@ -156,7 +157,7 @@ get_kernels() {
     printf '%s\n' "${kernels}"
 }
 
-# ==================== 依赖安装（原 install_deps.sh 内联） ====================
+# ==================== 依赖安装 ====================
 # 自动识别 Ubuntu 版本：22.04 -> Humble，24.04 -> Jazzy；支持 x86_64 / aarch64。
 
 apt_install_if_missing() {
