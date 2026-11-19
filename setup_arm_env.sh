@@ -2,13 +2,15 @@
 # setup_arm_env.sh — 主臂环境一键部署
 #
 # 流程：
-#   [1/4] 安装前置依赖
-#   [2/4] 部署 Zenoh（Router 级联，PC 网线直连机器人）
-#   [3/4] 交互式配置左右臂 USB-CAN 固定端口：
+#   [1/5] 安装前置依赖（含 Python 虚拟环境、ffmpeg/libav 视频依赖）
+#   [2/5] 部署 Zenoh（Router 级联，PC 网线直连机器人）
+#   [3/5] 安装 LeRobot Python 环境：
+#         venv + CUDA 12.8 PyTorch + PyPI 适配器 + MuJoCo
+#   [4/5] 交互式配置左右臂 USB-CAN 固定端口：
 #         插左臂 -> 自动检测新增 /dev/ttyACM* -> 写入 usbcan.rules 的 ttyMasterCANL
 #         插右臂 -> 自动检测新增 /dev/ttyACM* -> 写入 usbcan.rules 的 ttyMasterCANR
 #         自动安装规则并 reload，生成 /dev/ttyMasterCANL 与 /dev/ttyMasterCANR
-#   [4/4] 安装主臂运行时到 /opt/robot-h1，并生成 /usr/local/bin/arm_record_node
+#   [5/5] 安装主臂运行时到 /opt/robot-h1，并生成 /usr/local/bin/arm_record_node
 #
 # 用法（在本脚本所在目录执行）：
 #   chmod +x setup_arm_env.sh
@@ -17,6 +19,10 @@
 # 可选环境变量：
 #   SKIP_DEPS=1           跳过依赖安装
 #   SKIP_ZENOH=1          跳过 Zenoh Router 部署
+#   SKIP_PYTHON=1         跳过 LeRobot Python 环境安装
+#   H1_LEROBOT_VENV=...   虚拟环境路径；默认复用当前已激活的 venv，否则 ~/.venvs/h1-lerobot
+#   LEROBOT_PKG_SPEC=...  PyPI 安装项，默认 lerobot_robot_onero_h1[lerobot,camera]
+#   LEROBOT_SRC_DIR=...   从本地源码安装（PyPI 发布前测试用）
 #   H1_IP=10.42.0.2       机器人 end1 地址（网线直连默认固定）
 #   ACM_WAIT_SECONDS=15   插入设备后等待枚举的最长时间（秒），默认 15
 
@@ -38,6 +44,17 @@ TARGET_USER="${SUDO_USER:-${USER:-$(id -un)}}"
 WORK_DIR="${WORK_DIR:-./dev}"
 RBDL_VERSION="v3.3.1"
 JOBS="$(nproc)"
+
+# LeRobot Python 环境参数（RTX 5090 使用 CUDA 12.8 轮子）
+H1_LEROBOT_VENV="${H1_LEROBOT_VENV:-${VIRTUAL_ENV:-$HOME/.venvs/h1-lerobot}}"
+LEROBOT_PKG_SPEC="${LEROBOT_PKG_SPEC:-lerobot_robot_onero_h1[lerobot,camera]}"
+LEROBOT_SRC_DIR="${LEROBOT_SRC_DIR:-}"
+MUJOCO_VERSION="${MUJOCO_VERSION:-3.12.0}"
+TORCH_VERSION="${TORCH_VERSION:-2.8.0}"
+TORCHVISION_VERSION="${TORCHVISION_VERSION:-0.23.0}"
+TORCH_INDEX_CUDA="${TORCH_INDEX_CUDA:-https://download.pytorch.org/whl/cu128}"
+TORCH_INDEX_CPU="${TORCH_INDEX_CPU:-https://download.pytorch.org/whl/cpu}"
+PIP_NETWORK_OPTS=(--timeout 120 --retries 3)
 
 LEFT_NAME="ttyMasterCANL"
 RIGHT_NAME="ttyMasterCANR"
@@ -226,19 +243,26 @@ install_apt_packages() {
         apt_install_if_missing "${pkg}"
     done
 
+    log "安装 Python 虚拟环境与视频/相机系统依赖（已存在则跳过）..."
+    for pkg in python3-venv python3-pip ffmpeg \
+               libavcodec-dev libavformat-dev libavutil-dev libavdevice-dev \
+               libgl1 libglib2.0-0; do
+        apt_install_if_missing "${pkg}"
+    done
+
     log "安装并启用 openssh-server..."
     apt_install_if_missing openssh-server
     sudo systemctl enable ssh
     sudo systemctl restart ssh
     sudo systemctl status ssh --no-pager || true
 
-    log "[1/4] nlohmann-json3-dev"
+    log "安装 nlohmann-json3-dev..."
     apt_install_if_missing nlohmann-json3-dev
 
-    log "[3/4] libmodbus-dev"
+    log "安装 libmodbus-dev..."
     apt_install_if_missing libmodbus-dev
 
-    log "[4/4] ${PINOCCHIO_PKG}"
+    log "安装 ${PINOCCHIO_PKG}..."
     if ! apt-cache show "${PINOCCHIO_PKG}" >/dev/null 2>&1; then
         die "${PINOCCHIO_PKG} 不在 apt 源中（arch=${DPKG_ARCH}），请先配置 ROS 2 ${ROS_DISTRO} 软件源。"
     fi
@@ -290,7 +314,7 @@ install_pinocchio_pinned() {
 
 # 子 shell 中执行，避免 cd 影响后续相对路径
 install_rbdl_from_source() (
-    log "[2/4] 从源码安装 RBDL ${RBDL_VERSION}..."
+    log "从源码安装 RBDL ${RBDL_VERSION}..."
 
     if ldconfig -p | grep librbdl >/dev/null; then
         warn "链接缓存中已存在 RBDL，跳过编译；设置 FORCE_RBDL=1 可强制重装。"
@@ -379,6 +403,158 @@ deploy_zenoh() {
     printf '        请确保网线已正常接上；重新打开终端（或 source ~/.bashrc）后生效。\n\n'
 }
 
+# 安装 LeRobot Python 环境：venv + CUDA PyTorch + PyPI 适配器 + MuJoCo
+install_lerobot_python() {
+    log "========== 第 3 步：安装 LeRobot Python 环境 =========="
+    if [[ "${SKIP_PYTHON:-0}" == "1" ]]; then
+        warn "SKIP_PYTHON=1，跳过 Python 环境安装。"
+        return 0
+    fi
+
+    local venv="${H1_LEROBOT_VENV}"
+    local ros_setup="" f
+    for f in /opt/ros/jazzy/setup.bash /opt/ros/humble/setup.bash; do
+        if [[ -f "${f}" ]]; then
+            ros_setup="${f}"
+            break
+        fi
+    done
+    [[ -n "${ros_setup}" ]] || die "未找到 ROS 2 Jazzy/Humble，无法安装 LeRobot 环境。"
+
+    require_cmd python3
+    python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)' \
+        || die "LeRobot 0.6.1 需要 Python >= 3.12（当前：$(python3 --version 2>&1)）。"
+
+    if [[ ! -x "${venv}/bin/python" ]]; then
+        log "创建虚拟环境：${venv}"
+        python3 -m venv --system-site-packages "${venv}"
+    else
+        log "复用虚拟环境：${venv}"
+        if [[ -f "${venv}/pyvenv.cfg" ]] \
+           && ! grep -q '^include-system-site-packages = true' "${venv}/pyvenv.cfg"; then
+            warn "该 venv 未启用 --system-site-packages；若无法导入 rclpy，请删除后重装：rm -rf ${venv}"
+        fi
+    fi
+
+    local torch_index="${TORCH_INDEX_CPU}"
+    local want_cuda=""
+    if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
+        torch_index="${TORCH_INDEX_CUDA}"
+        case "${torch_index}" in
+            *cu128*) want_cuda="12.8" ;;
+            *cu126*) want_cuda="12.6" ;;
+            *cu124*) want_cuda="12.4" ;;
+        esac
+        log "检测到 NVIDIA GPU："
+        nvidia-smi --query-gpu=name,driver_version,compute_cap --format=csv,noheader || true
+
+        # cu128 轮子要求 Turing（sm_75）及以上；更老的 GPU 回退 CPU，
+        # 保证遥操/数采仍可用，避免装上无法执行的 GPU 内核。
+        local compute_cap cap_major cap_minor
+        compute_cap="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null \
+                       | head -n1 | tr -d '[:space:]' || true)"
+        if [[ "${compute_cap}" =~ ^([0-9]+)\.([0-9]+)$ ]]; then
+            cap_major="${BASH_REMATCH[1]}"
+            cap_minor="${BASH_REMATCH[2]}"
+            if (( cap_major < 7 || (cap_major == 7 && cap_minor < 5) )); then
+                warn "GPU 计算能力 sm_${cap_major}${cap_minor} 低于 cu128 支持范围，改用 CPU 版 PyTorch。"
+                warn "遥操/数采仍可使用；训练/rollout 建议换用 Turing 及以上 GPU。"
+                torch_index="${TORCH_INDEX_CPU}"
+                want_cuda=""
+            fi
+        fi
+    else
+        warn "未检测到可用的 NVIDIA GPU，回退到 CPU 版 PyTorch（遥操/数采可用，训练/rollout 无法使用 GPU）。"
+    fi
+
+    (
+        set +u
+        # shellcheck disable=SC1090
+        source "${ros_setup}"
+        # shellcheck disable=SC1091
+        source "${venv}/bin/activate"
+        set -u
+
+        python -c 'import rclpy' >/dev/null 2>&1 \
+            || die "虚拟环境无法导入 rclpy；请确认 ROS 2 已安装，并使用 --system-site-packages 创建 venv。"
+
+        python -m pip install "${PIP_NETWORK_OPTS[@]}" --upgrade \
+            pip 'setuptools>=71,<80' wheel 'packaging>=24.2,<26'
+
+        # 已有 CUDA 版本且满足 LeRobot 约束时跳过，避免重复下载数 GB
+        if python -c "import torch, sys; from packaging.version import Version; v=Version(torch.__version__); sys.exit(0 if (torch.version.cuda or '') == '${want_cuda}' and Version('2.7') <= v < Version('2.12') else 1)" 2>/dev/null; then
+            log "PyTorch 已满足要求（$(python -c 'import torch; print(torch.__version__)')），跳过。"
+        else
+            log "安装 PyTorch ${TORCH_VERSION} / torchvision ${TORCHVISION_VERSION}（${torch_index}）..."
+            if ! python -m pip install "${PIP_NETWORK_OPTS[@]}" \
+                --index-url "${torch_index}" --force-reinstall \
+                "torch==${TORCH_VERSION}" "torchvision==${TORCHVISION_VERSION}"; then
+                die "PyTorch 安装失败；请检查显卡驱动、网络和 ${torch_index} 是否可访问。"
+            fi
+        fi
+
+        if [[ -n "${LEROBOT_SRC_DIR}" ]]; then
+            log "从本地源码安装：${LEROBOT_SRC_DIR}"
+            if ! python -m pip install "${PIP_NETWORK_OPTS[@]}" \
+                -e "${LEROBOT_SRC_DIR}[lerobot,camera]"; then
+                die "本地源码安装失败：${LEROBOT_SRC_DIR}"
+            fi
+        else
+            log "从 PyPI 安装：${LEROBOT_PKG_SPEC}"
+            if ! python -m pip install "${PIP_NETWORK_OPTS[@]}" "${LEROBOT_PKG_SPEC}"; then
+                die "PyPI 安装失败。若包尚未发布，请设置 LEROBOT_SRC_DIR=/path/to/oneroh1lerobot 后重试。"
+            fi
+        fi
+
+        if ! python -m pip install "${PIP_NETWORK_OPTS[@]}" "mujoco==${MUJOCO_VERSION}"; then
+            die "MuJoCo ${MUJOCO_VERSION} 安装失败。"
+        fi
+
+        log "验证 Python 环境..."
+        python - <<'PY'
+import importlib.metadata as md
+
+import cv2
+import lerobot
+import mujoco
+import rclpy
+import torch
+import torchvision
+from onero_h1_lerobot import OneroH1Config, OneroH1Robot
+
+print(f"  LeRobot: {md.version('lerobot')}")
+print(f"  Adapter: {md.version('lerobot_robot_onero_h1')}")
+print(f"  PyTorch: {torch.__version__} (CUDA {torch.version.cuda})")
+print(f"  torchvision: {torchvision.__version__}")
+print(f"  MuJoCo: {mujoco.__version__}")
+print(f"  OpenCV: {cv2.__version__}")
+print(f"  rclpy: {rclpy.__file__}")
+
+if torch.cuda.is_available():
+    cap = torch.cuda.get_device_capability(0)
+    print(f"  GPU: {torch.cuda.get_device_name(0)} (sm_{cap[0]}{cap[1]})")
+    x = torch.randn(256, 256, device="cuda")
+    y = x @ x
+    torch.cuda.synchronize()
+    print(f"  GPU smoke: {float(y.abs().mean()):.4f}")
+else:
+    print("  WARN: CUDA 不可用，训练/rollout 将无法使用 GPU。")
+
+robot = OneroH1Robot(OneroH1Config(id="setup-verification", use_cameras=False))
+assert len(robot.action_features) == 16
+print("  Action schema: 16 dimensions")
+PY
+
+        if [[ -n "${want_cuda}" ]] && ! python -c 'import torch; raise SystemExit(0 if torch.cuda.is_available() else 1)'; then
+            die "检测到 NVIDIA GPU，但 PyTorch 无法使用 CUDA；请检查驱动是否支持 CUDA ${want_cuda}。"
+        fi
+    )
+
+    log "LeRobot Python 环境安装完成。"
+    printf '  虚拟环境：%s\n' "${venv}"
+    printf '  激活命令：source %s/bin/activate\n' "${venv}"
+}
+
 # 提示插入某一侧手臂，返回检测到的设备节点路径
 prompt_arm_device() {
     local side="$1"
@@ -465,7 +641,7 @@ verify_links() {
 }
 
 configure_usb_can() {
-    log "========== 第 3 步：配置左右臂 USB-CAN 固定端口 =========="
+    log "========== 第 4 步：配置左右臂 USB-CAN 固定端口 =========="
 
     press_enter "请先【拔掉】左右两臂的 USB-CAN 线（若已拔掉，直接回车即可）。"
     seed_known_acms
@@ -509,7 +685,7 @@ configure_usb_can() {
 }
 
 install_runtime() {
-    log "========== 第 4 步：安装主臂运行时 =========="
+    log "========== 第 5 步：安装主臂运行时 =========="
 
     local archive="${SCRIPT_DIR}/install.zip"
     [[ -f "${archive}" ]] || die "缺少 install.zip，无法安装主臂运行时。"
@@ -566,6 +742,11 @@ main() {
         die "请不要用 sudo 运行整个脚本；脚本会在需要时自动申请 sudo。"
     fi
 
+    case "$(uname -m)" in
+        x86_64|amd64) ;;
+        *) die "当前主臂运行时仅提供 x86_64 版本，检测到 $(uname -m)；请使用对应架构的运行时包。" ;;
+    esac
+
     require_cmd sudo
     require_cmd udevadm
 
@@ -577,6 +758,7 @@ main() {
 
     install_dependencies
     deploy_zenoh
+    install_lerobot_python
     configure_usb_can
     install_runtime
 
@@ -585,6 +767,11 @@ main() {
     printf '  右臂固定端口：%s  (KERNELS=="%s")\n' "${RIGHT_DEV}" "${RIGHT_KERNELS}"
     printf '  验证命令：ls -l /dev/ttyMasterCAN*\n'
     printf '  主臂程序：arm_record_node（LeRobot 连接机器人时自动启动）\n'
+    if [[ "${SKIP_PYTHON:-0}" != "1" ]]; then
+        printf '  LeRobot 环境：%s\n' "${H1_LEROBOT_VENV}"
+        printf '  激活：source %s/bin/activate\n' "${H1_LEROBOT_VENV}"
+        printf '  只读验证：onero-h1-print-observation --no-cameras --count 3\n'
+    fi
 }
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
