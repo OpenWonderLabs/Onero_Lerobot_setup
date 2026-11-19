@@ -585,10 +585,7 @@ main() {
     printf '  左臂固定端口：%s  (KERNELS=="%s")\n' "${LEFT_DEV}" "${LEFT_KERNELS}"
     printf '  右臂固定端口：%s  (KERNELS=="%s")\n' "${RIGHT_DEV}" "${RIGHT_KERNELS}"
     printf '  验证命令：ls -l /dev/ttyMasterCAN*\n'
-    printf '  主臂程序：arm_record_node（LeRobot 连接时自动启动，也可手动执行）\n'
-    if [[ -f "${SCRIPT_DIR}/start_arm_record.sh" ]]; then
-        printf '  本地启动脚本：./start_arm_record.sh\n'
-    fi
+    printf '  主臂程序：arm_record_node（LeRobot 连接机器人时自动启动）\n'
 }
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
