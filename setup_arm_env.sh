@@ -231,6 +231,59 @@ detect_ros_distro() {
     log "Pinocchio 包：${PINOCCHIO_PKG}"
 }
 
+ensure_ros2_apt_source() {
+    # 已有可用的 ROS 2 源时直接返回
+    if apt-cache show "ros-${ROS_DISTRO}-ros-base" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    local ros_mirror="${ROS_APT_MIRROR:-https://mirrors.tuna.tsinghua.edu.cn/ros2/ubuntu}"
+    log "配置 ROS 2 ${ROS_DISTRO} apt 源（${ros_mirror}）..."
+    apt_install_if_missing curl
+    apt_install_if_missing ca-certificates
+    apt_install_if_missing gnupg
+
+    local codename
+    codename="$(. /etc/os-release && echo "${UBUNTU_CODENAME:-${VERSION_CODENAME:-}}")"
+    if [[ -z "${codename}" ]]; then
+        die "无法确定 Ubuntu 代号，不能配置 ROS 2 软件源。"
+    fi
+
+    sudo install -m 0755 -d /usr/share/keyrings
+    if ! curl -fsSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key -o /tmp/ros.key 2>/dev/null; then
+        warn "从 GitHub 获取 ROS key 失败，改用 packages.ros.org。"
+        curl -fsSL http://packages.ros.org/ros.key -o /tmp/ros.key \
+            || die "无法下载 ROS 2 apt key，请检查网络。"
+    fi
+    sudo cp /tmp/ros.key /usr/share/keyrings/ros-archive-keyring.gpg
+    rm -f /tmp/ros.key
+
+    echo "deb [arch=${DPKG_ARCH} signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] ${ros_mirror} ${codename} main" \
+        | sudo tee /etc/apt/sources.list.d/ros2.list >/dev/null
+    sudo apt-get update -y
+}
+
+ensure_ros2_installed() {
+    if [[ "${SKIP_ROS:-0}" == "1" ]]; then
+        warn "SKIP_ROS=1，跳过 ROS 2 检测与安装。"
+        return 0
+    fi
+    if [[ -f "/opt/ros/${ROS_DISTRO}/setup.bash" ]]; then
+        log "已检测到 ROS 2 ${ROS_DISTRO}：/opt/ros/${ROS_DISTRO}"
+        ensure_ros2_apt_source
+        return 0
+    fi
+
+    log "未检测到 ROS 2 ${ROS_DISTRO}，开始自动安装..."
+    ensure_ros2_apt_source
+    sudo apt-get install -y "ros-${ROS_DISTRO}-ros-base" \
+        || die "ROS 2 ${ROS_DISTRO} 安装失败。"
+    if [[ ! -f "/opt/ros/${ROS_DISTRO}/setup.bash" ]]; then
+        die "ROS 2 ${ROS_DISTRO} 安装后仍缺少 /opt/ros/${ROS_DISTRO}/setup.bash。"
+    fi
+    log "ROS 2 ${ROS_DISTRO} 安装完成。"
+}
+
 install_apt_packages() {
     log "更新 apt 索引..."
     sudo apt-get update -y
@@ -370,6 +423,7 @@ install_dependencies() {
     fi
     detect_arch
     detect_ros_distro
+    ensure_ros2_installed
     install_apt_packages
     install_rbdl_from_source
     verify_dependencies
