@@ -500,14 +500,40 @@ install_lerobot_python() {
                 die "本地源码安装失败：${LEROBOT_SRC_DIR}"
             fi
         else
-            log "从 PyPI 安装：${LEROBOT_PKG_SPEC}"
-            if ! python -m pip install "${PIP_NETWORK_OPTS[@]}" "${LEROBOT_PKG_SPEC}"; then
-                die "PyPI 安装失败。若包尚未发布，请设置 LEROBOT_SRC_DIR=/path/to/oneroh1lerobot 后重试。"
+            pkg_spec="${LEROBOT_PKG_SPEC}"
+            if [[ "${pkg_spec}" == *.whl || "${pkg_spec}" == *.tar.gz || "${pkg_spec}" == *.zip ]]; then
+                # 本地包路径不会自动带上 extras，补上后再安装，否则 LeRobot 本身不会装。
+                if [[ "${pkg_spec}" != *"["* ]]; then
+                    pkg_spec="${pkg_spec}[lerobot,camera]"
+                fi
+                log "从本地包安装：${pkg_spec}"
+                # 同版本 wheel 会被 pip 判定为“已安装”而跳过；先卸载以确保使用最新构建。
+                python -m pip uninstall -y lerobot_robot_onero_h1 >/dev/null 2>&1 || true
+                if ! python -m pip install "${PIP_NETWORK_OPTS[@]}" "${pkg_spec}"; then
+                    die "本地包安装失败：${pkg_spec}"
+                fi
+            else
+                log "从 PyPI 安装：${pkg_spec}"
+                if ! python -m pip install "${PIP_NETWORK_OPTS[@]}" "${pkg_spec}"; then
+                    die "PyPI 安装失败。若包尚未发布，请设置 LEROBOT_SRC_DIR=/path/to/oneroh1lerobot 后重试。"
+                fi
             fi
+        fi
+
+        if ! python -m pip install "${PIP_NETWORK_OPTS[@]}" "scipy>=1.14,<2"; then
+            die "SciPy 安装失败（LeRobot policy 依赖 scipy>=1.14）。"
         fi
 
         if ! python -m pip install "${PIP_NETWORK_OPTS[@]}" "mujoco==${MUJOCO_VERSION}"; then
             die "MuJoCo ${MUJOCO_VERSION} 安装失败。"
+        fi
+
+        # LeRobot 的 dataset extra 允许 torchcodec<0.12，但 0.8+ 需要 torch 2.9，
+        # 与这里固定的 torch 2.8 不兼容；0.7.0 与 torch 2.8 匹配。
+        if [[ "$(uname -m)" == "x86_64" ]]; then
+            python -m pip install "${PIP_NETWORK_OPTS[@]}" --force-reinstall --no-deps \
+                "torchcodec==0.7.0" \
+                || warn "torchcodec 0.7.0 安装失败，视频解码将回退到 pyav"
         fi
 
         log "验证 Python 环境..."
