@@ -579,6 +579,12 @@ install_lerobot_python() {
             fi
         fi
 
+        # pi0.5（pi05）策略在 rollout 时需要 transformers，由 LeRobot 的 [pi] extra 提供。
+        # 这里显式补装，兼容未在 wheel 元数据中声明该依赖的旧版本。
+        if ! python -m pip install "${PIP_NETWORK_OPTS[@]}" "lerobot[pi]==0.6.1"; then
+            warn "transformers 安装失败，pi0.5（pi05）rollout 将不可用。"
+        fi
+
         if ! python -m pip install "${PIP_NETWORK_OPTS[@]}" "scipy>=1.14,<2"; then
             die "SciPy 安装失败（LeRobot policy 依赖 scipy>=1.14）。"
         fi
@@ -822,6 +828,172 @@ WRAPPER
     printf '  目录：/opt/robot-h1/install\n'
 }
 
+# 部署完成后统一自检：环境、CUDA、ROS、Zenoh、设备、主臂程序。
+verify_environment() {
+    local ok_count=0 warn_count=0 fail_count=0
+
+    chk_ok()   { ok_count=$((ok_count + 1));   printf '  [\033[1;32mOK\033[0m]   %s\n' "$*"; }
+    chk_warn() { warn_count=$((warn_count + 1)); printf '  [\033[1;33mWARN\033[0m] %s\n' "$*"; }
+    chk_fail() { fail_count=$((fail_count + 1)); printf '  [\033[1;31mFAIL\033[0m] %s\n' "$*"; }
+
+    printf '\n'
+    log "========== 环境自检 =========="
+
+    # ROS 2
+    if [[ "${SKIP_ROS:-0}" == "1" ]]; then
+        chk_warn "ROS 2 检测已跳过（SKIP_ROS=1）"
+    elif [[ -n "${ROS_DISTRO:-}" && -f "/opt/ros/${ROS_DISTRO}/setup.bash" ]]; then
+        chk_ok "ROS 2 ${ROS_DISTRO} 已安装"
+    else
+        chk_fail "未找到 ROS 2 环境（/opt/ros/<distro>/setup.bash）"
+    fi
+
+    if grep -qs 'RMW_IMPLEMENTATION=rmw_zenoh_cpp' "${HOME}/.bashrc"; then
+        chk_ok "~/.bashrc 已配置 rmw_zenoh_cpp"
+    else
+        chk_warn "~/.bashrc 未配置 RMW_IMPLEMENTATION=rmw_zenoh_cpp"
+    fi
+
+    # Zenoh
+    if [[ "${SKIP_ZENOH:-0}" == "1" ]]; then
+        chk_warn "Zenoh 检测已跳过（SKIP_ZENOH=1）"
+    else
+        if systemctl is-active --quiet zenoh-router 2>/dev/null; then
+            chk_ok "zenoh-router 服务运行中"
+        else
+            chk_fail "zenoh-router 未运行（systemctl status zenoh-router）"
+        fi
+        if command -v ss >/dev/null 2>&1 && ss -lnt 2>/dev/null | grep -q ':7447 '; then
+            chk_ok "Zenoh 端口 7447 正在监听"
+        else
+            chk_fail "Zenoh 端口 7447 未监听"
+        fi
+    fi
+
+    # 机器人连通性
+    if timeout 3 bash -c "cat < /dev/null > /dev/tcp/${H1_IP}/7447" 2>/dev/null; then
+        chk_ok "可连接机器人 ${H1_IP}:7447"
+    else
+        chk_warn "无法连接 ${H1_IP}:7447（检查网线直连与机器人电源）"
+    fi
+
+    # USB-CAN udev 与设备
+    if [[ -f /etc/udev/rules.d/usbcan.rules ]]; then
+        chk_ok "USB-CAN udev 规则已安装"
+    else
+        chk_fail "缺少 /etc/udev/rules.d/usbcan.rules"
+    fi
+    local dev
+    for dev in /dev/ttyMasterCANL /dev/ttyMasterCANR; do
+        if [[ -e "${dev}" ]]; then
+            chk_ok "设备存在：${dev}"
+        else
+            chk_warn "未检测到 ${dev}（重新拔插对应 USB-CAN 后重试）"
+        fi
+    done
+
+    # 主臂程序
+    if [[ -x /usr/local/bin/arm_record_node ]]; then
+        chk_ok "主臂程序入口：/usr/local/bin/arm_record_node"
+    else
+        chk_fail "缺少主臂程序 /usr/local/bin/arm_record_node"
+    fi
+
+    # Python / LeRobot / GPU
+    if [[ "${SKIP_PYTHON:-0}" == "1" ]]; then
+        chk_warn "Python 环境检测已跳过（SKIP_PYTHON=1）"
+    else
+        local py="${H1_LEROBOT_VENV}/bin/python"
+        if [[ ! -x "${py}" ]]; then
+            chk_fail "未找到虚拟环境 Python：${py}"
+        else
+            chk_ok "Python 虚拟环境：${H1_LEROBOT_VENV}（$("${py}" -V 2>&1)）"
+
+            local pyver
+            pyver="$("${py}" -c 'import importlib.metadata as m; print(m.version("lerobot"))' 2>/dev/null || true)"
+            if [[ -n "${pyver}" ]]; then
+                chk_ok "LeRobot 已安装：${pyver}"
+            else
+                chk_fail "无法导入 lerobot（检查 ${H1_LEROBOT_VENV}）"
+            fi
+
+            if "${py}" -c "import onero_h1_lerobot" >/dev/null 2>&1; then
+                chk_ok "适配器 onero_h1_lerobot 可导入"
+            else
+                chk_fail "无法导入 onero_h1_lerobot"
+            fi
+
+            if [[ -x "${H1_LEROBOT_VENV}/bin/onero-h1-lerobot-rollout" ]]; then
+                chk_ok "CLI 可用：onero-h1-lerobot-rollout"
+            else
+                chk_fail "缺少 CLI：onero-h1-lerobot-rollout"
+            fi
+
+            local tfver
+            tfver="$("${py}" -c 'import transformers; print(transformers.__version__)' 2>/dev/null || true)"
+            if [[ -n "${tfver}" ]]; then
+                chk_ok "transformers 已安装：${tfver}（pi0.5 可用）"
+            else
+                chk_warn "未安装 transformers，pi0.5 策略不可用"
+            fi
+
+            local mjver
+            mjver="$("${py}" -c 'import mujoco; print(mujoco.__version__)' 2>/dev/null || true)"
+            if [[ -n "${mjver}" ]]; then
+                chk_ok "MuJoCo 已安装：${mjver}"
+            else
+                chk_warn "未安装 MuJoCo（仿真不可用）"
+            fi
+
+            local torch_info
+            torch_info="$("${py}" - <<'PY' 2>/dev/null
+import torch
+cuda = torch.cuda.is_available()
+name = torch.cuda.get_device_name(0) if cuda else "CPU"
+cc = ".".join(map(str, torch.cuda.get_device_capability(0))) if cuda else "-"
+print(f"{torch.__version__}|{torch.version.cuda or '-'}|{cuda}|{name}|{cc}")
+PY
+)"
+            if [[ -z "${torch_info}" ]]; then
+                chk_fail "PyTorch 不可用"
+            else
+                local tver tcuda tavailable tname tcc
+                IFS='|' read -r tver tcuda tavailable tname tcc <<< "${torch_info}"
+                chk_ok "PyTorch：${tver}（CUDA 构建 ${tcuda}）"
+                if [[ "${tavailable}" == "True" ]]; then
+                    chk_ok "CUDA 已启用：${tname}（compute ${tcc}）"
+                else
+                    chk_warn "CUDA 不可用，将回退 CPU（遥操/采集可用，训练不建议）"
+                fi
+            fi
+        fi
+    fi
+
+    # NVIDIA 驱动
+    if command -v nvidia-smi >/dev/null 2>&1; then
+        local gpu
+        gpu="$(nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader 2>/dev/null | head -1 || true)"
+        if [[ -n "${gpu}" ]]; then
+            chk_ok "GPU：${gpu}"
+        else
+            chk_warn "nvidia-smi 无输出（驱动异常）"
+        fi
+    else
+        chk_warn "未检测到 nvidia-smi（无 NVIDIA 驱动时使用 CPU）"
+    fi
+
+    printf '\n'
+    log "========== 自检结论 =========="
+    printf '  通过 %d 项，告警 %d 项，失败 %d 项\n' "${ok_count}" "${warn_count}" "${fail_count}"
+    if [[ "${fail_count}" -gt 0 ]]; then
+        printf '  结论：存在失败项，请按上方 FAIL 提示处理后重新检查。\n'
+    elif [[ "${warn_count}" -gt 0 ]]; then
+        printf '  结论：可以开始使用；WARN 项请按需处理。\n'
+    else
+        printf '  结论：全部检查通过，可以开始使用。\n'
+    fi
+}
+
 main() {
     if [[ "${EUID}" -eq 0 ]]; then
         die "请不要用 sudo 运行整个脚本；脚本会在需要时自动申请 sudo。"
@@ -857,6 +1029,8 @@ main() {
         printf '  激活：source %s/bin/activate\n' "${H1_LEROBOT_VENV}"
         printf '  只读验证：onero-h1-print-observation --no-cameras --count 3\n'
     fi
+
+    verify_environment
 }
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
