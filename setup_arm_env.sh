@@ -848,10 +848,12 @@ verify_environment() {
         chk_fail "未找到 ROS 2 环境（/opt/ros/<distro>/setup.bash）"
     fi
 
-    if grep -qs 'RMW_IMPLEMENTATION=rmw_zenoh_cpp' "${HOME}/.bashrc"; then
-        chk_ok "~/.bashrc 已配置 rmw_zenoh_cpp"
+    # ~/.bashrc 不直接写赋值，而是 source /etc/zenoh/ros.env
+    if grep -qs 'zenoh/ros.env' "${HOME}/.bashrc" \
+        && grep -qs '^RMW_IMPLEMENTATION=rmw_zenoh_cpp' /etc/zenoh/ros.env 2>/dev/null; then
+        chk_ok "~/.bashrc 已加载 Zenoh 环境（rmw_zenoh_cpp）"
     else
-        chk_warn "~/.bashrc 未配置 RMW_IMPLEMENTATION=rmw_zenoh_cpp"
+        chk_warn "~/.bashrc 未加载 /etc/zenoh/ros.env（rmw_zenoh_cpp）"
     fi
 
     # Zenoh
