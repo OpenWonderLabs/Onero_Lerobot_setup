@@ -239,9 +239,14 @@ install_apt_packages() {
     local pkg
     for pkg in git cmake build-essential pkg-config \
                libeigen3-dev liburdfdom-dev libtinyxml2-dev \
-               net-tools python3-colcon-common-extensions; do
+               net-tools; do
         apt_install_if_missing "${pkg}"
     done
+
+    # colcon 仅源码编译 ROS 包时需要；部分 ROS 2 源/镜像不提供该包，缺失时跳过。
+    if ! apt_install_if_missing python3-colcon-common-extensions; then
+        warn "python3-colcon-common-extensions 不可用，跳过（运行时部署不需要）。"
+    fi
 
     log "安装 Python 虚拟环境与视频/相机系统依赖（已存在则跳过）..."
     for pkg in python3-venv python3-pip ffmpeg \
