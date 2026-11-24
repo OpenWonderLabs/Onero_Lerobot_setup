@@ -10,7 +10,7 @@
 #         插左臂 -> 自动检测新增 /dev/ttyACM* -> 写入 usbcan.rules 的 ttyMasterCANL
 #         插右臂 -> 自动检测新增 /dev/ttyACM* -> 写入 usbcan.rules 的 ttyMasterCANR
 #         自动安装规则并 reload，生成 /dev/ttyMasterCANL 与 /dev/ttyMasterCANR
-#   [5/5] 安装主臂运行时到 /opt/robot-h1，并生成 /usr/local/bin/arm_record_node
+#   [5/5] 安装主臂运行时到 ~/robot-h1，并生成 ~/.local/bin/arm_record_node
 #
 # 用法（在本脚本所在目录执行）：
 #   chmod +x setup_arm_env.sh
@@ -646,9 +646,17 @@ PY
         fi
     )
 
+    # 生成 ~/h1_env.sh：新终端只需 source 一次即可完成环境激活
+    local repo_dir env_script
+    repo_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+    env_script="${HOME}/h1_env.sh"
+    sed -e "s|@VENV@|${venv}|g" -e "s|@DATASETS@|${HOME}/lerobot_datasets|g" \
+        "${repo_dir}/h1_env.sh" > "${env_script}"
+    chmod 0644 "${env_script}"
+
     log "LeRobot Python 环境安装完成。"
     printf '  虚拟环境：%s\n' "${venv}"
-    printf '  激活命令：source %s/bin/activate\n' "${venv}"
+    printf '  激活命令：source ~/h1_env.sh\n'
 }
 
 # 提示插入某一侧手臂，返回检测到的设备节点路径
@@ -801,9 +809,10 @@ install_runtime() {
     # zip 可能丢失执行权限
     find "${tmp_dir}/install" -path '*/lib/*' -type f -exec chmod +x {} + 2>/dev/null || true
 
-    sudo install -d -m 0755 /opt/robot-h1
-    sudo rm -rf /opt/robot-h1/install
-    sudo cp -a "${tmp_dir}/install" /opt/robot-h1/install
+    local arm_home="${HOME}/robot-h1"
+    install -d -m 0755 "${arm_home}"
+    rm -rf "${arm_home}/install"
+    cp -a "${tmp_dir}/install" "${arm_home}/install"
     rm -rf "${tmp_dir}"
 
     local wrapper
@@ -822,15 +831,21 @@ if [ -f /etc/zenoh/ros.env ]; then
     source /etc/zenoh/ros.env
     set +a
 fi
-source /opt/robot-h1/install/setup.bash
-exec /opt/robot-h1/install/armcontrol/lib/armcontrol/arm_record_node "$@"
+source "$HOME/robot-h1/install/setup.bash"
+exec "$HOME/robot-h1/install/armcontrol/lib/armcontrol/arm_record_node" "$@"
 WRAPPER
-    sudo install -m 0755 "${wrapper}" /usr/local/bin/arm_record_node
+    install -d -m 0755 "${HOME}/.local/bin"
+    install -m 0755 "${wrapper}" "${HOME}/.local/bin/arm_record_node"
     rm -f "${wrapper}"
 
+    # 让新终端能找到 ~/.local/bin 下的入口（重复执行不会重复追加）
+    if ! grep -q '\.local/bin' "${HOME}/.bashrc" 2>/dev/null; then
+        printf '\nexport PATH="$HOME/.local/bin:$PATH"\n' >> "${HOME}/.bashrc"
+    fi
+
     log "主臂运行时安装完成："
-    printf '  入口：/usr/local/bin/arm_record_node\n'
-    printf '  目录：/opt/robot-h1/install\n'
+    printf '  入口：%s/.local/bin/arm_record_node\n' "${HOME}"
+    printf '  目录：%s/robot-h1/install\n' "${HOME}"
 }
 
 # 部署完成后统一自检：环境、CUDA、ROS、Zenoh、设备、主臂程序。
@@ -900,10 +915,16 @@ verify_environment() {
     done
 
     # 主臂程序
-    if [[ -x /usr/local/bin/arm_record_node ]]; then
-        chk_ok "主臂程序入口：/usr/local/bin/arm_record_node"
+    local arm_entry="${HOME}/.local/bin/arm_record_node"
+    if [[ -x "${arm_entry}" ]]; then
+        chk_ok "主臂程序入口：${arm_entry}"
     else
-        chk_fail "缺少主臂程序 /usr/local/bin/arm_record_node"
+        chk_fail "缺少主臂程序 ${arm_entry}"
+    fi
+    if [[ -f "${HOME}/robot-h1/install/setup.bash" ]]; then
+        chk_ok "主臂运行时目录：${HOME}/robot-h1/install"
+    else
+        chk_fail "缺少主臂运行时目录 ${HOME}/robot-h1/install"
     fi
 
     # Python / LeRobot / GPU

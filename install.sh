@@ -50,5 +50,6 @@ chmod +x setup_arm_env.sh
 say "开始部署，请按终端提示操作 ..."
 ./setup_arm_env.sh
 
-say "部署完成：主臂运行时位于 /opt/robot-h1，入口为 /usr/local/bin/arm_record_node。"
+say "部署完成：主臂运行时位于 ~/robot-h1，入口为 ~/.local/bin/arm_record_node。"
+say "新终端执行 source ~/h1_env.sh 即可完成环境激活。"
 say "之后运行 LeRobot 采集时会自动启动主臂程序。"
