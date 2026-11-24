@@ -815,6 +815,25 @@ install_runtime() {
     cp -a "${tmp_dir}/install" "${arm_home}/install"
     rm -rf "${tmp_dir}"
 
+    # 预编译的 arm_record_node 依赖 Pinocchio 3.9；当前 ROS 源只有 4.x，
+    # 系统缺少 3.9 运行库时用 pip 的 pin==3.9.0 提供，并写入 install/setup.bash。
+    if [[ ! -e "/opt/ros/${ROS_DISTRO}/lib/x86_64-linux-gnu/libpinocchio_parsers.so.3.9.0" ]]; then
+        local pin_env="${arm_home}/pinocchio39" pin_lib=""
+        if [[ ! -x "${pin_env}/bin/pip" ]]; then
+            log "创建 Pinocchio 3.9 运行环境..."
+            python3 -m venv "${pin_env}"
+        fi
+        if ! compgen -G "${pin_env}/lib/python*/site-packages/cmeel.prefix/lib/libpinocchio_parsers.so.3.9.0" >/dev/null; then
+            log "安装 Pinocchio 3.9 运行库（pip pin==3.9.0）..."
+            "${pin_env}/bin/pip" install --no-cache-dir -q "pin==3.9.0" \
+                || die "Pinocchio 3.9 运行库安装失败，请确认可访问 PyPI。"
+        fi
+        pin_lib="$(echo "${pin_env}"/lib/python*/site-packages/cmeel.prefix/lib)"
+        printf '\n# Onero H1: 为预编译的 arm_record_node 提供 Pinocchio 3.9 运行库\nexport LD_LIBRARY_PATH="%s${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"\n' \
+            "${pin_lib}" >> "${arm_home}/install/setup.bash"
+        log "Pinocchio 3.9 运行库已就绪：${pin_lib}"
+    fi
+
     local wrapper
     wrapper="$(mktemp)"
     cat > "${wrapper}" <<'WRAPPER'
