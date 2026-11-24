@@ -11,11 +11,11 @@ elif [ -f /opt/ros/humble/setup.bash ]; then
     source /opt/ros/humble/setup.bash
 fi
 
-source "@VENV@/bin/activate"
-
-export HF_LEROBOT_HOME="${HF_LEROBOT_HOME:-@DATASETS@}"
-
-# 加载 ~/.bashrc；H1_ENV_LOADED 防止用户把它写进 bashrc 后递归
+# 先加载 ~/.bashrc（它会重设 PS1）；H1_ENV_LOADED 防止用户把它写进 bashrc 后递归
 if [ -z "${H1_ENV_LOADED:-}" ] && [ -f "$HOME/.bashrc" ]; then
     H1_ENV_LOADED=1 source "$HOME/.bashrc"
 fi
+
+source "@VENV@/bin/activate"
+
+export HF_LEROBOT_HOME="${HF_LEROBOT_HOME:-@DATASETS@}"
