@@ -5,7 +5,7 @@
 #   [1/5] 安装前置依赖（含 Python 虚拟环境、ffmpeg/libav 视频依赖）
 #   [2/5] 部署 Zenoh（Router 级联，PC 网线直连机器人）
 #   [3/5] 安装 LeRobot Python 环境：
-#         venv + CUDA 12.8 PyTorch + PyPI 适配器 + MuJoCo
+#         venv + CUDA 12.8 PyTorch + GitHub 源码适配器 + MuJoCo
 #   [4/5] 交互式配置左右臂 USB-CAN 固定端口：
 #         插左臂 -> 自动检测新增 /dev/ttyACM* -> 写入 usbcan.rules 的 ttyMasterCANL
 #         插右臂 -> 自动检测新增 /dev/ttyACM* -> 写入 usbcan.rules 的 ttyMasterCANR
@@ -21,8 +21,9 @@
 #   SKIP_ZENOH=1          跳过 Zenoh Router 部署
 #   SKIP_PYTHON=1         跳过 LeRobot Python 环境安装
 #   H1_LEROBOT_VENV=...   虚拟环境路径；默认复用当前已激活的 venv，否则 ~/.venvs/h1-lerobot
-#   LEROBOT_PKG_SPEC=...  PyPI 安装项，默认 lerobot_robot_onero_h1[lerobot,camera]
-#   LEROBOT_SRC_DIR=...   从本地源码安装（PyPI 发布前测试用）
+#   LEROBOT_PKG_SPEC=...  适配器安装项，默认从 GitHub 源码安装
+#                         （git+https://github.com/OpenWonderLabs/onero_lerobot.git@master）
+#   LEROBOT_SRC_DIR=...   从本地源码目录安装（离线调试用）
 #   H1_IP=10.42.0.2       机器人 end1 地址（网线直连默认固定）
 #   ACM_WAIT_SECONDS=15   插入设备后等待枚举的最长时间（秒），默认 15
 
@@ -47,7 +48,7 @@ JOBS="$(nproc)"
 
 # LeRobot Python 环境参数（RTX 5090 使用 CUDA 12.8 轮子）
 H1_LEROBOT_VENV="${H1_LEROBOT_VENV:-${VIRTUAL_ENV:-$HOME/.venvs/h1-lerobot}}"
-LEROBOT_PKG_SPEC="${LEROBOT_PKG_SPEC:-lerobot_robot_onero_h1[lerobot,camera]}"
+LEROBOT_PKG_SPEC="${LEROBOT_PKG_SPEC:-lerobot_robot_onero_h1[lerobot,camera] @ git+https://github.com/OpenWonderLabs/onero_lerobot.git@master}"
 LEROBOT_SRC_DIR="${LEROBOT_SRC_DIR:-}"
 MUJOCO_VERSION="${MUJOCO_VERSION:-3.12.0}"
 TORCH_VERSION="${TORCH_VERSION:-2.8.0}"
@@ -462,7 +463,7 @@ deploy_zenoh() {
     printf '        请确保网线已正常接上；重新打开终端（或 source ~/.bashrc）后生效。\n\n'
 }
 
-# 安装 LeRobot Python 环境：venv + CUDA PyTorch + PyPI 适配器 + MuJoCo
+# 安装 LeRobot Python 环境：venv + CUDA PyTorch + GitHub 源码适配器 + MuJoCo
 install_lerobot_python() {
     log "========== 第 3 步：安装 LeRobot Python 环境 =========="
     if [[ "${SKIP_PYTHON:-0}" == "1" ]]; then
@@ -572,9 +573,13 @@ install_lerobot_python() {
                     die "本地包安装失败：${pkg_spec}"
                 fi
             else
-                log "从 PyPI 安装：${pkg_spec}"
-                if ! python -m pip install "${PIP_NETWORK_OPTS[@]}" "${pkg_spec}"; then
-                    die "PyPI 安装失败。若包尚未发布，请设置 LEROBOT_SRC_DIR=/path/to/oneroh1lerobot 后重试。"
+                if [[ "${pkg_spec}" == *"git+"* ]] && ! command -v git >/dev/null 2>&1; then
+                    die "从 GitHub 源码安装需要 git，请先安装 git（或不要设置 SKIP_DEPS=1）。"
+                fi
+                log "安装适配器：${pkg_spec}"
+                # --upgrade：重复部署时从 GitHub 拉取最新代码，而不是沿用已安装版本。
+                if ! python -m pip install "${PIP_NETWORK_OPTS[@]}" --upgrade "${pkg_spec}"; then
+                    die "适配器安装失败：检查网络能否访问 GitHub，或用 LEROBOT_PKG_SPEC / LEROBOT_SRC_DIR 指定其他来源。"
                 fi
             fi
         fi
