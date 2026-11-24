@@ -116,7 +116,11 @@ def install_packages(role, backup):
     if role == 'orin':
         required += ['chrony', 'openssh-server']
     options = ['--no-install-recommends']
-    run(['apt-get', '-o', 'APT::Update::Error-Mode=any', 'update'], timeout=None)
+    try:
+        run(['apt-get', '-o', 'APT::Update::Error-Mode=any', 'update'], timeout=None)
+    except subprocess.CalledProcessError:
+        print('警告：部分软件源更新失败，已忽略并继续。'
+              '如果后续安装软件包失败，请检查 /etc/apt/sources.list.d/ 中失效的源。')
     # Explicitly request the serialization/runtime packages in the same update
     # as the message libraries; their metadata may omit minimum ABI versions.
     # Preserve existing pin/hold policies and never run a whole-system upgrade.
